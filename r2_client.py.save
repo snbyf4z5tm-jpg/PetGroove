@@ -1,0 +1,32 @@
+# r2_client.py
+import uuid
+import boto3
+from botocore.client import Config
+from settings import settings
+
+# Cloudflare R2 requires path-style addressing and SigV4. Region must be "auto".
+_s3 = boto3.client(
+    "s3",
+    endpoint_url=settings.r2_endpoint_url,                 # e.g. https://<account>.r2.cloudflarestorage.com
+    aws_access_key_id=settings.r2_access_key_id,
+    aws_secret_access_key=settings.r2_secret_access_key,
+    region_name="auto",
+    config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+)
+def upload_bytes_and_get_signed_url(*args, **kwargs):
+    raise RuntimeError("PRESIGN_CALLED")  # safety trip-wire; should never be used now
+
+from botocore.exceptions import ClientError
+
+def upload_to_key(data: bytes, key: str, content_type: str = "video/mp4"):
+    """
+    Uploads bytes to a specific key in the bucket.
+    """
+    _s3.put_object(Bucket=settings.r2_bucket, Key=key, Body=data, ContentType=content_type)
+
+def get_object_stream(key: str):
+    """
+    Returns (streaming_body, content_type) for the given key in the bucket.
+    """
+    obj = _s3.get_object(Bucket=settings.r2_bucket, Key=key)
+    return obj["Body"], obj.get("ContentType", "application/octet-stream")

@@ -1,0 +1,13 @@
+# .railwayignore
+.venv
+venv
+__pycache__/
+*.pyc
+.local/
+.git/
+.gitignore
+local_renders/
+*.mp4
+*.mov
+.DS_Store
+node_modules/

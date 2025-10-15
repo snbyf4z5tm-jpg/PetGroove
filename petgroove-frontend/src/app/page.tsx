@@ -1,187 +1,302 @@
 'use client';
 
-import * as React from 'react';
-import { useState, useEffect } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, '') ?? 'https://api.petgroove.app';
+type JobStatus = 'idle' | 'queued' | 'processing' | 'done' | 'error';
 
-type JobStatus = 'queued' | 'processing' | 'done' | 'error';
+type CreateJobBody = {
+  image_url: string;
+  motion_id: string;
+  style: string;
+};
 
-interface JobResponse {
+type CreateJobResponse = {
   id: string;
   status: JobStatus;
   video_url?: string | null;
   error?: string | null;
+};
+
+type GetJobResponse = {
+  id: string;
+  status: JobStatus;
+  video_url?: string | null;
+  error?: string | null;
+};
+
+type UploadResponse = {
+  url: string;
+};
+
+const MOTIONS = [
+  { id: 'tiktok_hiphop_01', label: 'TikTok Hiphop 01' },
+  // add more here later
+];
+
+const STYLES = [
+  { id: 'photoreal', label: 'photoreal' },
+  // add more here later
+];
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8000';
+const POLL_MS = Number(process.env.NEXT_PUBLIC_POLL_INTERVAL_MS ?? 1200);
+
+function isHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 export default function Page() {
-  const [imageUrl, setImageUrl] = useState(
-    'https://picul.de/700x500/pm/Yhv'
-  );
-  const [motionId, setMotionId] = useState('tiktok_hiphop_01');
-  const [style, setStyle] = useState('photoreal');
+  const [imageUrl, setImageUrl] = useState<string>('');
+  const [motionId, setMotionId] = useState<string>(MOTIONS[0].id);
+  const [style, setStyle] = useState<string>(STYLES[0].id);
+
+  const [status, setStatus] = useState<JobStatus>('idle');
   const [jobId, setJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<JobStatus | 'idle'>('idle');
-  const [error, setError] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // Submit handler
-  const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setError(null);
-    setVideoUrl(null);
-    setStatus('queued');
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadName, setUploadName] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
-    try {
-      const res = await fetch(`${API_BASE}/jobs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_url: imageUrl, motion_id: motionId, style }),
-      });
+  const canSubmit = useMemo(() => {
+    return isHttpUrl(imageUrl) && motionId.length > 0 && style.length > 0 && status !== 'processing';
+  }, [imageUrl, motionId, style, status]);
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `POST /jobs failed (${res.status})`);
-      }
+  const startPoll = useCallback(async (id: string) => {
+    let keepGoing = true;
 
-      const data: JobResponse = await res.json();
-      setJobId(data.id);
-      setStatus('queued');
-    } catch (err) {
-      setStatus('error');
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  // Polling
-  useEffect(() => {
-    if (!jobId) return;
-
-    let stop = false;
-    const poll = async () => {
+    while (keepGoing) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
       try {
-        const res = await fetch(`${API_BASE}/jobs/${jobId}`);
-        if (!res.ok) throw new Error(`GET /jobs/${jobId} failed (${res.status})`);
-        const data: JobResponse = await res.json();
-
-        if (stop) return;
-
+        const r = await fetch(`${API_BASE}/jobs/${id}`);
+        if (!r.ok) {
+          throw new Error(`poll failed: ${r.status}`);
+        }
+        const data = (await r.json()) as GetJobResponse;
         setStatus(data.status);
         if (data.status === 'done') {
           setVideoUrl(data.video_url ?? null);
-        }
-        if (data.status === 'error') {
+          setError(null);
+          keepGoing = false;
+        } else if (data.status === 'error') {
+          setVideoUrl(null);
           setError(data.error ?? 'Unknown error');
+          keepGoing = false;
         }
-        if (data.status === 'queued' || data.status === 'processing') {
-          setTimeout(poll, Number(process.env.NEXT_PUBLIC_POLL_INTERVAL_MS ?? 1200));
-        }
-      } catch (err) {
-        if (!stop) {
-          setStatus('error');
-          setError(err instanceof Error ? err.message : String(err));
-        }
+      } catch (e) {
+        setError((e as Error).message);
+        keepGoing = false;
       }
-    };
+    }
+  }, []);
 
-    poll();
-    return () => {
-      stop = true;
-    };
-  }, [jobId]);
+  const submit = useCallback(async () => {
+    if (!isHttpUrl(imageUrl)) {
+      setError('Please provide a valid image URL or upload a file.');
+      return;
+    }
+    setStatus('queued');
+    setVideoUrl(null);
+    setError(null);
 
-  // Typed change handlers (remove `any`)
-  const onChangeImage = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setImageUrl(e.target.value);
+    try {
+      const body: CreateJobBody = {
+        image_url: imageUrl,
+        motion_id: motionId,
+        style,
+      };
+      const r = await fetch(`${API_BASE}/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`create failed: ${r.status} ${text}`);
+      }
+      const data = (await r.json()) as CreateJobResponse;
+      setJobId(data.id);
+      setStatus(data.status);
+      startPoll(data.id);
+    } catch (e) {
+      setStatus('error');
+      setError((e as Error).message);
+    }
+  }, [API_BASE, imageUrl, motionId, style, startPoll]);
 
-  const onChangeMotion = (e: React.ChangeEvent<HTMLSelectElement>) =>
-    setMotionId(e.target.value);
+  const upload = useCallback(async (file: File) => {
+    setIsUploading(true);
+    setUploadName(file.name);
+    setError(null);
 
-  const onChangeStyle = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setStyle(e.target.value);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(`${API_BASE}/upload`, {
+        method: 'POST',
+        body: fd,
+      });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`upload failed: ${r.status} ${text}`);
+      }
+      const data = (await r.json()) as UploadResponse;
+      setImageUrl(data.url); // switch the form into URL mode with the public URL
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setIsUploading(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  }, []);
+
+  const onFileChanged = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const f = e.target.files?.[0];
+      if (f) {
+        void upload(f);
+      }
+    },
+    [upload]
+  );
 
   return (
-    <main className="min-h-screen bg-black text-white">
-      <div className="max-w-3xl mx-auto p-6 space-y-6">
-        <h1 className="text-3xl font-bold">PetGroove</h1>
-        <p className="text-zinc-400">Turn a pet photo into a short video with one click.</p>
+    <main className="min-h-dvh bg-neutral-950 text-neutral-100">
+      <div className="mx-auto max-w-5xl px-4 py-10">
+        <h1 className="text-3xl font-semibold tracking-tight">PetGroove</h1>
+        <p className="mt-2 text-neutral-300">
+          Turn a pet photo into a short video with one click.
+        </p>
 
-        <form onSubmit={onSubmit} className="space-y-4 rounded-lg border border-zinc-800 p-4">
-          <label className="block text-sm text-zinc-400">Image URL</label>
+        {/* Card */}
+        <div className="mt-8 rounded-xl border border-neutral-800 bg-neutral-900/60 p-5 shadow-lg">
+          {/* URL input */}
+          <label className="block text-sm font-medium text-neutral-300">Image URL</label>
           <input
-            className="w-full rounded-md bg-zinc-900 border border-zinc-800 p-3"
-            type="url"
+            className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-800 px-3 py-2 text-neutral-100 outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="https://example.com/cat.jpg"
             value={imageUrl}
-            onChange={onChangeImage}
-            placeholder="https://…"
-            required
+            onChange={(e) => setImageUrl(e.target.value)}
           />
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Uploader */}
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
             <div>
-              <label className="block text-sm text-zinc-400">Motion preset</label>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*"
+                onChange={onFileChanged}
+                className="block w-full text-sm file:mr-4 file:cursor-pointer file:rounded-md file:border-0 file:bg-neutral-800 file:px-4 file:py-2 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
+              />
+            </div>
+            <div className="text-xs text-neutral-400">
+              {isUploading ? `Uploading ${uploadName ?? 'image'}…` : 'Or upload a file (auto-uploads)'}
+            </div>
+          </div>
+
+          {/* Controls */}
+          <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-neutral-300">Motion preset</label>
               <select
-                className="w-full rounded-md bg-zinc-900 border border-zinc-800 p-3"
                 value={motionId}
-                onChange={onChangeMotion}
+                onChange={(e) => setMotionId(e.target.value)}
+                className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-800 px-3 py-2 text-neutral-100 outline-none focus:ring-2 focus:ring-indigo-500"
               >
-                <option value="tiktok_hiphop_01">TikTok Hiphop 01</option>
-                <option value="tiktok_hiphop_02">TikTok Hiphop 02</option>
+                {MOTIONS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
               </select>
             </div>
             <div>
-              <label className="block text-sm text-zinc-400">Style</label>
-              <input
-                className="w-full rounded-md bg-zinc-900 border border-zinc-800 p-3"
+              <label className="block text-sm font-medium text-neutral-300">Style</label>
+              <select
                 value={style}
-                onChange={onChangeStyle}
-                placeholder="photoreal"
-              />
+                onChange={(e) => setStyle(e.target.value)}
+                className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-800 px-3 py-2 text-neutral-100 outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {STYLES.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
-          <button
-            type="submit"
-            className="rounded-md bg-violet-600 hover:bg-violet-500 px-4 py-2 font-medium"
-          >
-            Generate video
-          </button>
-        </form>
-
-        <div className="text-sm">
-          <div className="text-zinc-400">
-            Status: <span className="text-white">{status}</span>
-            {error ? (
-              <div className="mt-2 rounded-md bg-red-900/40 border border-red-800 p-3 text-red-200">
-                {error}
-              </div>
-            ) : null}
+          <div className="mt-6">
+            <button
+              onClick={submit}
+              disabled={!canSubmit}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Generate video
+            </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Status */}
+        <div className="mt-4 text-sm">
+          <span className="text-neutral-400">Status:</span>{' '}
+          <span className={status === 'error' ? 'text-red-400' : 'text-neutral-200'}>
+            {status} {jobId ? `(${jobId})` : ''}
+          </span>
+        </div>
+        {error && (
+          <div className="mt-3 rounded-md border border-red-800 bg-red-950/60 p-3 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        {/* Panels */}
+        <div className="mt-6 grid gap-6 sm:grid-cols-2">
           <div>
-            <h3 className="mb-2 text-zinc-400 text-sm">Input image preview</h3>
-            <div className="aspect-video rounded-md border border-zinc-800 overflow-hidden">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={imageUrl} alt="" className="w-full h-full object-cover" />
+            <h3 className="mb-2 text-sm font-medium text-neutral-300">Input image preview</h3>
+            <div className="aspect-[4/3] w-full overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900">
+              {imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={imageUrl}
+                  alt="preview"
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center text-neutral-500">
+                  No image yet
+                </div>
+              )}
             </div>
           </div>
 
           <div>
-            <h3 className="mb-2 text-zinc-400 text-sm">Result</h3>
-            <div className="aspect-video rounded-md border border-zinc-800 overflow-hidden flex items-center justify-center">
+            <h3 className="mb-2 text-sm font-medium text-neutral-300">Result</h3>
+            <div className="aspect-[4/3] w-full overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900">
               {videoUrl ? (
-                <video src={videoUrl} controls className="w-full h-full" />
+                <video
+                  controls
+                  playsInline
+                  className="h-full w-full"
+                  src={videoUrl}
+                />
               ) : (
-                <span className="text-zinc-600">No result yet</span>
+                <div className="flex h-full items-center justify-center text-neutral-500">
+                  No result yet
+                </div>
               )}
             </div>
           </div>
         </div>
 
-        <p className="text-xs text-zinc-500">
+        <p className="mt-8 text-center text-xs text-neutral-500">
           API: {API_BASE}
         </p>
       </div>
